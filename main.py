@@ -1,119 +1,109 @@
-#bot = ('5879800806:AAF61W_F76vbTR3SFa6_59syolJUPgf6Rhg')
+import re
+import urllib.parse
+import os
 
-import telebot
-import openai
-# admin_id = 5214644649
-# openai.api_key = "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"
-# api = '5879800806:AAF61W_F76vbTR3SFa6_59syolJUPgf6Rhg'
-
-
-openai.api_key = "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"
-api = '5879800806:AAF61W_F76vb3SFa6_59syolJUPgf6Rhg'
-bot = telebot.TeleBot(api)
+import extraction
+import requests
+from telegram import Update
+from telegram.ext import Updater, CommandHandler, CallbackContext
 
 
-chatting_users = {}
-channel_id = -1001753652819 # replace this with your channel ID
+def gen_gdrive_file_name(gdrive_id):
+    url = f"https://drive.google.com/open?id={gdrive_id}"
+    html = requests.get(url).text
+    return extraction.Extractor().extract(html, source_url=url).title
 
-def rsp(question, engine):
-    try:
-        prompt = "Q: {qst}\nA:".format(qst=question)
-        response = openai.Completion.create(
-            engine=engine,
-            prompt=prompt,
-            max_tokens=500,
-            n=1,
-            stop=None,
-            temperature=0.4,
+
+def gdrive_extract_id(gdrive_link):
+    match = re.match(
+        r"^https://drive\.google\.com/file/d/([a-zA-Z0-9_-]+)/?.*$", gdrive_link
+    )
+    if match:
+        return match.group(1)
+    query_params = urllib.parse.parse_qs(urllib.parse.urlparse(gdrive_link).query)
+    if "id" in query_params:
+        return query_params["id"][0]
+    return None
+
+
+def get_confirm_token(response):
+    for key, value in response.cookies.items():
+        if key.startswith("download_warning"):
+            return value
+    return None
+
+
+def download(update: Update, context: CallbackContext):
+    gd_id = context.args[0]
+    if gd_id != "":
+        id = gd_id
+        URL = "https://docs.google.com/uc?export=download"
+        session = requests.Session()
+        response = session.get(URL, params={"id": id, "confirm": 1}, stream=True)
+        token = get_confirm_token(response)
+        if token:
+            params = {"id": id, "confirm": token}
+            response = session.get(URL, params=params, stream=True)
+
+        file_name = gen_gdrive_file_name(id)
+        with open(file_name, "wb") as f:
+            for chunk in response.iter_content(chunk_size=8192):
+                if chunk:
+                    f.write(chunk)
+
+        update.message.reply_document(
+            document=open(file_name, "rb"),
+            filename=file_name,
+            caption=f"Here's your file: {file_name}",
         )
-        return response.choices[0].text
-    except Exception as e:
-        return "Oopsie-daisy! It looks like I'm a bit tied up right now and can't answer your request. But don't worry, I'll get back to you soon!\nSend /start after a while...or \ncontact: @gladson1"
+        os.remove(file_name)
+
+    else:
+        update.message.reply_text("Invalid Link")
 
 
-def check_user_in_channel(user_id):
-    try:
-        member = bot.get_chat_member(channel_id, user_id)
-        return member.status != 'left'
-    except Exception as e:
-        print(e)
-        return False
+def upload(update: Update, context: CallbackContext):
+    file_path = context.args[0]
+    if os.path.isdir(file_path):
+        for file_name in os.listdir(file_path):
+            full_path = os.path.join(file_path, file_name)
+            if os.path.isfile(full_path):
+                update.message.reply_document(
+                    document=open(full_path, "rb"),
+                    filename=file_name,
+                    caption=f"Here's your file: {file_name}",
+                )
+            else:
+                update.message.reply_text(
+                    f"{file_name} is not a file and will not be uploaded."
+                )
+    else:
+        update.message.reply_text(f"{file_path} is not a directory.")
 
 
-@bot.message_handler(commands=['start'])
-def send_welcome(message):
-    user_id = message.chat.id
-    if user_id not in chatting_users:
-        bot.send_message(user_id, f"#Hello! Your ID is: {user_id}")
-        chatting_users[user_id] = True
-    bot.send_message(user_id, 'Hello, Welcome to OMG bot. \nAsk me whatever you want & get cool answer. \nPowered by [Gemechis](https://t.me/gladson1)', parse_mode='Markdown')
+def start(update: Update, context: CallbackContext):
+    update.message.reply_text("Welcome to the Telegram Google Drive Downloader bot!")
 
 
-@bot.message_handler(commands=['developer'])
-def send_developer(message):
-    text = "I'm *Gemechis Chala*, the developer of this bot. \nYou can find me on telegram [@gladson1](https://t.me/gladson1).\n\nYou can also check out my channel [MAALGAARIIN](https://t.me/maalgaariin) for more information about my projects."
-    bot.send_message(message.chat.id, text, parse_mode='Markdown')
+def main():
+    # Create the Updater and pass it your bot's token.
+    updater = Updater("YOUR_BOT_TOKEN_HERE")
+
+    # Get the dispatcher to register handlers
+    dp = updater.dispatcher
+
+    # Add handlers for /start, /download, and /upload commands
+    dp.add_handler(CommandHandler("start", start))
+    dp.add_handler(CommandHandler("download", download))
+    dp.add_handler(CommandHandler("upload", upload))
+
+    # Start the Bot
+    updater.start_polling()
+
+    # Run the bot until the user presses Ctrl-C or the process receives SIGINT,
+    # SIGTERM or SIGABRT
+    updater.idle()
 
 
-@bot.message_handler(commands=['stop'])
-def stop_chatting(message):
-    user_id = message.chat.id
-    if user_id != 5214644649: # replace this with your user ID
-        bot.send_message(user_id, 'Sorry, only admins can send this command.')
-        return
-    try:
-        target_user_id = int(message.text.split()[1])
-    except:
-        bot.send_message(user_id, 'Invalid command. Please use the format "/stop userid".')
-        return
-    if target_user_id not in chatting_users:
-        bot.send_message(user_id, 'User is not currently chatting with the bot.')
-        return
-    chatting_users[target_user_id] = False
-    bot.send_message(target_user_id, 'You may have to pay to use this bot. \nFor more: [Contact Me](https://t.me/gladson1)', parse_mode='Markdown')
-    bot.send_message(user_id, 'Stopped chatting with user {}.'.format(target_user_id))
-
-
-@bot.message_handler(commands=['unstop'])
-def unstop_chatting(message):
-    user_id = message.chat.id
-    if user_id != 5214644649: # replace this with your user ID
-        bot.send_message(user_id, 'Sorry, only admins can send this command.')
-        return
-    try:
-        target_user_id = int(message.text.split()[1])
-    except:
-        bot.send_message(user_id, 'Invalid command. Please use the format "/unstop userid".')
-        return
-    if target_user_id not in chatting_users:
-        bot.send_message(user_id, 'User is not known to the bot.')
-        return
-    chatting_users[target_user_id] = True
-    bot.send_message(target_user_id, 'Your chat started again.')
-    bot.send_message(user_id, 'Started chatting with user {} again.'.format(target_user_id))
-
-
-@bot.message_handler(func=lambda message: True)
-def echo_message(message):
-    user_id = message.chat.id
-    if user_id not in chatting_users:
-        bot.send_message(user_id, f"#Hello! Your ID is: {user_id}")
-        chatting_users[user_id] = True
-    if not chatting_users.get(user_id, False):
-        bot.send_message(target_user_id, 'You may have to pay to use this bot. \nFor more: [Contact Me](https://t.me/gladson1)', parse_mode='Markdown')
-        return
-    if not check_user_in_channel(user_id):
-        bot.send_message(user_id, 'Please join [@MAALGAARIIN](https://t.me/maalgaariin) to use me.', parse_mode='Markdown')
-        return
-    bot.send_chat_action(user_id, 'typing')
-    msg = message.text
-    response = rsp(msg, "gpt-2")
-    bot.send_message(user_id, response)
-
-
-print('bot start running')
-while True:
-    try:
-        bot.polling()
-    except Exception as e:
-        print("An error has occurred:", e)
+if __name__ == "__main__":
+    main()
